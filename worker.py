@@ -14,8 +14,8 @@ from common import (
     PROTOCOL_VERSION,
     heartbeat_resp_dict,
 )
-from cracking import ThreadedBruteForcer
-from hashing import build_verifier, detect_algorithm_name
+from cracking import StaticFirstCharBruteForcer
+from hashing import build_verifier
 
 
 class WorkerApp:
@@ -27,17 +27,13 @@ class WorkerApp:
         self._send_lock = threading.Lock()
         self._done = threading.Event()
 
-        self._bruteforcer: Optional[ThreadedBruteForcer] = None
-        self._crack_result_password: Optional[str] = None
-        self._crack_found: bool = False
-        self._compute_time: float = 0.0
+        self._bruteforcer: Optional[StaticFirstCharBruteForcer] = None
 
     def _safe_send(self, sock: socket.socket, obj: dict) -> None:
         with self._send_lock:
             MessageIO.send_msg(sock, obj)
 
     def _heartbeat_loop(self, sock: socket.socket) -> None:
-        # Allow periodic timeout so we can exit when done
         sock.settimeout(1.0)
         while not self._done.is_set():
             try:
@@ -45,17 +41,12 @@ class WorkerApp:
             except socket.timeout:
                 continue
             except Exception:
-                # if connection dies, end loop
                 self._done.set()
                 return
 
-            mtype = msg.get("type")
-            if mtype == "HEARTBEAT_REQ":
+            if msg.get("type") == "HEARTBEAT_REQ":
                 if self._bruteforcer is None:
-                    # Not started yet
-                    delta = 0
-                    total = 0
-                    active = 0
+                    delta = total = active = 0
                 else:
                     delta = self._bruteforcer.get_delta_since_last_heartbeat()
                     total = self._bruteforcer.get_total_tested()
@@ -67,11 +58,6 @@ class WorkerApp:
                 except Exception:
                     self._done.set()
                     return
-                continue
-
-            # Controller should not send anything else while job is running
-            # Ignore unknown messages to avoid breaking correctness
-            continue
 
     def run(self) -> int:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -85,33 +71,32 @@ class WorkerApp:
             job_msg = MessageIO.recv_msg(sock)
             job = Job.from_dict(job_msg)
 
-            # Build verifier
-            _ = detect_algorithm_name(job.full_hash)
+            # Enforce ONLY length=3
+            if job.length != 3:
+                raise ValueError("This worker build only supports length=3")
+
             verifier = build_verifier(job.full_hash)
 
-            # Start heartbeat responder thread
+            print("Algo:", detect_algorithm_name(job.full_hash))
+            print("Verifier:", verifier.__class__.__name__)
+
+            # Heartbeat responder
             hb_thread = threading.Thread(target=self._heartbeat_loop, args=(sock,), daemon=True)
             hb_thread.start()
 
-            # Start cracking (fixed-length as per job.length)
-            self._bruteforcer = ThreadedBruteForcer(
+            # Cracking (static partition by first char)
+            self._bruteforcer = StaticFirstCharBruteForcer(
                 verifier=verifier,
                 charset=job.charset,
-                length=job.length,
                 threads=self.threads,
-                chunk_size=2000,
+                batch_commit=200,  # use 10–25 for yescrypt if you want more frequent HB progress
             )
 
             t0 = time.perf_counter()
             crack_res = self._bruteforcer.run()
             t1 = time.perf_counter()
 
-            self._compute_time = t1 - t0
-            self._crack_found = crack_res.found
-            self._crack_result_password = crack_res.password
-
-            # Send final result
-            result = Result(found=crack_res.found, password=crack_res.password, compute_time=self._compute_time)
+            result = Result(found=crack_res.found, password=crack_res.password, compute_time=(t1 - t0))
             self._safe_send(sock, result.to_dict())
 
             self._done.set()

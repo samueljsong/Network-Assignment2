@@ -92,7 +92,7 @@ class ControllerApp:
             if reg.get("type") != "REGISTER" or reg.get("v") != PROTOCOL_VERSION:
                 raise ProtocolError("Invalid REGISTER message.")
 
-            # Send job (FULL SPACE, fixed length 3)
+            # Send job (fixed length=3)
             job = Job(
                 full_hash=entry.full_hash,
                 length=3,
@@ -113,34 +113,21 @@ class ControllerApp:
             last_hb_time = time.perf_counter()
 
             print(f"Heartbeat interval: {self.heartbeat_seconds}s")
-            print("Waiting for result... (heartbeats will print progress)")
-
-            result: Result | None = None
+            print("Waiting for result...")
 
             while True:
                 now = time.perf_counter()
 
-                # send heartbeat if due
                 if now >= next_hb:
-                    try:
-                        MessageIO.send_msg(conn, heartbeat_req_dict())
-                    except Exception as e:
-                        raise ProtocolError(f"Failed to send heartbeat: {e}") from e
+                    MessageIO.send_msg(conn, heartbeat_req_dict())
                     next_hb = now + self.heartbeat_seconds
 
-                # wait for incoming message (timeout so we can heartbeat on schedule)
                 timeout = max(0.0, min(0.25, next_hb - now))
                 events = sel.select(timeout)
-
                 if not events:
                     continue
 
-                # read a message
-                try:
-                    msg = MessageIO.recv_msg(conn)  # may raise if connection closed
-                except BlockingIOError:
-                    continue
-
+                msg = MessageIO.recv_msg(conn)
                 mtype = msg.get("type")
 
                 if mtype == "HEARTBEAT_RESP":

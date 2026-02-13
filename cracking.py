@@ -17,19 +17,17 @@ class CrackResult:
 
 class StaticFirstCharBruteForcer:
     """
-    Fixed-length=3 brute force over charset^3.
+    ONLY length=3 brute force over charset^3.
 
     Static partitioning:
-      - Split the FIRST character (c1) space into T disjoint slices.
-      - Each thread i enumerates:
-            for c1 in slice_i:
-                for c2 in full_charset:
-                    for c3 in full_charset:
+      - Split FIRST character space into T disjoint slices.
+      - Each thread enumerates:
+            for c1 in slice:
+                for c2 in charset:
+                    for c3 in charset:
                         test(c1+c2+c3)
 
-    This covers the full search space exactly once (no duplicates, no omissions),
-    and is simple to reason about for the report.
-
+    Covers full space exactly once, no duplicates, no omissions.
     Tracks total_tested + delta since last heartbeat.
     """
 
@@ -81,10 +79,6 @@ class StaticFirstCharBruteForcer:
                 self._stop.set()
 
     def _slice_for_thread(self, i: int) -> str:
-        """
-        Split the first-character set into T slices using integer partitioning.
-        This ensures disjoint slices and full coverage even when len(charset) % threads != 0.
-        """
         n = len(self.charset)
         start = (n * i) // self.threads
         end = (n * (i + 1)) // self.threads
@@ -96,15 +90,12 @@ class StaticFirstCharBruteForcer:
 
         local = 0
         try:
-            # Exactly length 3
             for c1 in first_chars:
                 if self._stop.is_set():
                     return
-
                 for c2 in self.charset:
                     if self._stop.is_set():
                         return
-
                     for c3 in self.charset:
                         if self._stop.is_set():
                             return
@@ -113,19 +104,16 @@ class StaticFirstCharBruteForcer:
                         local += 1
 
                         if self.verifier.verify(candidate):
-                            # commit remaining count before exiting
                             if local:
                                 self._add_tested(local)
                                 local = 0
                             self._set_found(candidate)
                             return
 
-                        # commit periodically so heartbeats show progress without per-attempt locking
                         if local >= self.batch_commit:
                             self._add_tested(local)
                             local = 0
 
-            # flush remainder
             if local:
                 self._add_tested(local)
 
@@ -135,7 +123,6 @@ class StaticFirstCharBruteForcer:
 
     def run(self) -> CrackResult:
         threads: List[threading.Thread] = []
-
         for i in range(self.threads):
             first_chars = self._slice_for_thread(i)
             t = threading.Thread(target=self._worker, args=(first_chars,), daemon=True)

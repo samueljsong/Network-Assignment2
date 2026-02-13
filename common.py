@@ -1,128 +1,152 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import json
-import socket
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Optional, List
+import threading
 
-BUFFER_SIZE = 4096
-PROTOCOL_VERSION = 1
-
-
-class ProtocolError(Exception):
-    pass
+from hashing import HashVerifier
 
 
-class MessageIO:
-    @staticmethod
-    def recv_msg(conn: socket.socket) -> Dict[str, Any]:
-        header = MessageIO._recv_exact(conn, 4)
-        length = int.from_bytes(header, "big")
-        if length <= 0 or length > 100_000_000:
-            raise ProtocolError(f"Invalid message length: {length}")
-
-        data = MessageIO._recv_exact(conn, length)
-        try:
-            obj = json.loads(data.decode("utf-8"))
-        except Exception as e:
-            raise ProtocolError(f"Invalid JSON payload: {e}") from e
-        if not isinstance(obj, dict):
-            raise ProtocolError("Message must be a JSON object.")
-        return obj
-
-    @staticmethod
-    def send_msg(conn: socket.socket, obj: Dict[str, Any]) -> None:
-        payload = json.dumps(obj).encode("utf-8")
-        conn.sendall(len(payload).to_bytes(4, "big") + payload)
-
-    @staticmethod
-    def _recv_exact(conn: socket.socket, n: int) -> bytes:
-        buf = b""
-        while len(buf) < n:
-            chunk = conn.recv(n - len(buf))  # may raise socket.timeout
-            if not chunk:
-                raise ProtocolError("Connection closed unexpectedly.")
-            buf += chunk
-        return buf
-
-
-@dataclass(frozen=True)
-class Job:
-    full_hash: str
-    length: int
-    charset: str
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "type": "JOB",
-            "v": PROTOCOL_VERSION,
-            "hash": self.full_hash,
-            "length": self.length,
-            "charset": self.charset,
-        }
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "Job":
-        if d.get("type") != "JOB":
-            raise ProtocolError("Expected JOB message.")
-        if d.get("v") != PROTOCOL_VERSION:
-            raise ProtocolError("Protocol version mismatch.")
-        return Job(
-            full_hash=str(d["hash"]),
-            length=int(d["length"]),
-            charset=str(d["charset"]),
-        )
-
-
-@dataclass(frozen=True)
-class Result:
+@dataclass
+class CrackResult:
     found: bool
     password: Optional[str]
-    compute_time: float
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "type": "RESULT",
-            "v": PROTOCOL_VERSION,
-            "found": self.found,
-            "password": self.password,
-            "compute_time": self.compute_time,
-        }
-
-    @staticmethod
-    def from_dict(d: Dict[str, Any]) -> "Result":
-        if d.get("type") != "RESULT":
-            raise ProtocolError("Expected RESULT message.")
-        if d.get("v") != PROTOCOL_VERSION:
-            raise ProtocolError("Protocol version mismatch.")
-        return Result(
-            found=bool(d["found"]),
-            password=d.get("password", None),
-            compute_time=float(d["compute_time"]),
-        )
+    tried: int
 
 
-# ---- Heartbeat messages ----
+class StaticFirstCharBruteForcer:
+    """
+    Fixed-length=3 brute force over charset^3.
 
-def heartbeat_req_dict() -> Dict[str, Any]:
-    return {"type": "HEARTBEAT_REQ", "v": PROTOCOL_VERSION}
+    Static partitioning:
+      - Split the FIRST character (c1) space into T disjoint slices.
+      - Each thread i enumerates:
+            for c1 in slice_i:
+                for c2 in full_charset:
+                    for c3 in full_charset:
+                        test(c1+c2+c3)
 
+    This covers the full search space exactly once (no duplicates, no omissions),
+    and is simple to reason about for the report.
 
-def heartbeat_resp_dict(delta_tested: int, total_tested: int, threads_active: int) -> Dict[str, Any]:
-    return {
-        "type": "HEARTBEAT_RESP",
-        "v": PROTOCOL_VERSION,
-        "delta_tested": int(delta_tested),
-        "total_tested": int(total_tested),
-        "threads_active": int(threads_active),
-    }
+    Tracks total_tested + delta since last heartbeat.
+    """
 
+    def __init__(self, verifier: HashVerifier, charset: str, threads: int, batch_commit: int = 200) -> None:
+        if threads <= 0:
+            raise ValueError("threads must be > 0")
+        if not charset:
+            raise ValueError("charset must be non-empty")
 
-def supported_charset_79() -> str:
-    return (
-        "abcdefghijklmnopqrstuvwxyz"
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "0123456789"
-        "!@#$%^&*()-_=+[]{}|;:',.<>/?"
-    )
+        self.verifier = verifier
+        self.charset = charset
+        self.threads = threads
+        self.batch_commit = max(1, batch_commit)
+
+        self._stop = threading.Event()
+
+        self._found_lock = threading.Lock()
+        self._found_password: Optional[str] = None
+
+        self._count_lock = threading.Lock()
+        self._total_tested = 0
+        self._last_hb_total = 0
+
+        self._threads_active = 0
+        self._threads_active_lock = threading.Lock()
+
+    def _add_tested(self, n: int) -> None:
+        with self._count_lock:
+            self._total_tested += n
+
+    def get_total_tested(self) -> int:
+        with self._count_lock:
+            return self._total_tested
+
+    def get_delta_since_last_heartbeat(self) -> int:
+        with self._count_lock:
+            delta = self._total_tested - self._last_hb_total
+            self._last_hb_total = self._total_tested
+            return delta
+
+    def get_threads_active(self) -> int:
+        with self._threads_active_lock:
+            return self._threads_active
+
+    def _set_found(self, password: str) -> None:
+        with self._found_lock:
+            if self._found_password is None:
+                self._found_password = password
+                self._stop.set()
+
+    def _slice_for_thread(self, i: int) -> str:
+        """
+        Split the first-character set into T slices using integer partitioning.
+        This ensures disjoint slices and full coverage even when len(charset) % threads != 0.
+        """
+        n = len(self.charset)
+        start = (n * i) // self.threads
+        end = (n * (i + 1)) // self.threads
+        return self.charset[start:end]
+
+    def _worker(self, first_chars: str) -> None:
+        with self._threads_active_lock:
+            self._threads_active += 1
+
+        local = 0
+        try:
+            # Exactly length 3
+            for c1 in first_chars:
+                if self._stop.is_set():
+                    return
+
+                for c2 in self.charset:
+                    if self._stop.is_set():
+                        return
+
+                    for c3 in self.charset:
+                        if self._stop.is_set():
+                            return
+
+                        candidate = c1 + c2 + c3
+                        local += 1
+
+                        if self.verifier.verify(candidate):
+                            # commit remaining count before exiting
+                            if local:
+                                self._add_tested(local)
+                                local = 0
+                            self._set_found(candidate)
+                            return
+
+                        # commit periodically so heartbeats show progress without per-attempt locking
+                        if local >= self.batch_commit:
+                            self._add_tested(local)
+                            local = 0
+
+            # flush remainder
+            if local:
+                self._add_tested(local)
+
+        finally:
+            with self._threads_active_lock:
+                self._threads_active -= 1
+
+    def run(self) -> CrackResult:
+        threads: List[threading.Thread] = []
+
+        for i in range(self.threads):
+            first_chars = self._slice_for_thread(i)
+            t = threading.Thread(target=self._worker, args=(first_chars,), daemon=True)
+            threads.append(t)
+            t.start()
+
+        for t in threads:
+            t.join()
+
+        tried = self.get_total_tested()
+        with self._found_lock:
+            pw = self._found_password
+
+        return CrackResult(found=(pw is not None), password=pw, tried=tried)
