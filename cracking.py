@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, List
 import threading
-import time
 
 from hashing import HashVerifier
 
@@ -16,16 +15,25 @@ class CrackResult:
     tried: int
 
 
-class ThreadedBruteForcer:
+class StaticFirstCharBruteForcer:
     """
-    Fixed-length brute force over charset^length.
-    Partitions work by a shared next_index with chunking (no duplicates, no omissions).
+    Fixed-length=3 brute force over charset^3.
+
+    Static partitioning:
+      - Split the FIRST character (c1) space into T disjoint slices.
+      - Each thread i enumerates:
+            for c1 in slice_i:
+                for c2 in full_charset:
+                    for c3 in full_charset:
+                        test(c1+c2+c3)
+
+    This covers the full search space exactly once (no duplicates, no omissions),
+    and is simple to reason about for the report.
+
     Tracks total_tested + delta since last heartbeat.
     """
 
-    def __init__(self, verifier: HashVerifier, charset: str, length: int, threads: int, chunk_size: int = 2000) -> None:
-        if length <= 0:
-            raise ValueError("length must be > 0")
+    def __init__(self, verifier: HashVerifier, charset: str, threads: int, batch_commit: int = 200) -> None:
         if threads <= 0:
             raise ValueError("threads must be > 0")
         if not charset:
@@ -33,15 +41,8 @@ class ThreadedBruteForcer:
 
         self.verifier = verifier
         self.charset = charset
-        self.length = length
         self.threads = threads
-        self.chunk_size = max(1, chunk_size)
-
-        self.base = len(charset)
-        self.total_space = self.base ** self.length
-
-        self._next_index = 0
-        self._index_lock = threading.Lock()
+        self.batch_commit = max(1, batch_commit)
 
         self._stop = threading.Event()
 
@@ -55,32 +56,9 @@ class ThreadedBruteForcer:
         self._threads_active = 0
         self._threads_active_lock = threading.Lock()
 
-    def _index_to_candidate(self, idx: int) -> str:
-        # Base-N conversion to fixed-length string (leading zeros allowed)
-        chars: List[str] = [""] * self.length
-        for pos in range(self.length - 1, -1, -1):
-            idx, digit = divmod(idx, self.base)
-            chars[pos] = self.charset[digit]
-        return "".join(chars)
-
-    def _claim_chunk(self) -> Optional[range]:
-        with self._index_lock:
-            if self._next_index >= self.total_space:
-                return None
-            start = self._next_index
-            end = min(self.total_space, start + self.chunk_size)
-            self._next_index = end
-        return range(start, end)
-
     def _add_tested(self, n: int) -> None:
         with self._count_lock:
             self._total_tested += n
-
-    def _set_found(self, password: str) -> None:
-        with self._found_lock:
-            if self._found_password is None:
-                self._found_password = password
-                self._stop.set()
 
     def get_total_tested(self) -> int:
         with self._count_lock:
@@ -96,36 +74,71 @@ class ThreadedBruteForcer:
         with self._threads_active_lock:
             return self._threads_active
 
-    def _worker_thread(self) -> None:
+    def _set_found(self, password: str) -> None:
+        with self._found_lock:
+            if self._found_password is None:
+                self._found_password = password
+                self._stop.set()
+
+    def _slice_for_thread(self, i: int) -> str:
+        """
+        Split the first-character set into T slices using integer partitioning.
+        This ensures disjoint slices and full coverage even when len(charset) % threads != 0.
+        """
+        n = len(self.charset)
+        start = (n * i) // self.threads
+        end = (n * (i + 1)) // self.threads
+        return self.charset[start:end]
+
+    def _worker(self, first_chars: str) -> None:
         with self._threads_active_lock:
             self._threads_active += 1
+
+        local = 0
         try:
-            while not self._stop.is_set():
-                chunk = self._claim_chunk()
-                if chunk is None:
+            # Exactly length 3
+            for c1 in first_chars:
+                if self._stop.is_set():
                     return
 
-                local_tested = 0
-                for idx in chunk:
+                for c2 in self.charset:
                     if self._stop.is_set():
-                        break
-                    candidate = self._index_to_candidate(idx)
-                    local_tested += 1
-                    if self.verifier.verify(candidate):
-                        self._add_tested(local_tested)
-                        self._set_found(candidate)
                         return
 
-                if local_tested:
-                    self._add_tested(local_tested)
+                    for c3 in self.charset:
+                        if self._stop.is_set():
+                            return
+
+                        candidate = c1 + c2 + c3
+                        local += 1
+
+                        if self.verifier.verify(candidate):
+                            # commit remaining count before exiting
+                            if local:
+                                self._add_tested(local)
+                                local = 0
+                            self._set_found(candidate)
+                            return
+
+                        # commit periodically so heartbeats show progress without per-attempt locking
+                        if local >= self.batch_commit:
+                            self._add_tested(local)
+                            local = 0
+
+            # flush remainder
+            if local:
+                self._add_tested(local)
+
         finally:
             with self._threads_active_lock:
                 self._threads_active -= 1
 
     def run(self) -> CrackResult:
         threads: List[threading.Thread] = []
-        for _ in range(self.threads):
-            t = threading.Thread(target=self._worker_thread, daemon=True)
+
+        for i in range(self.threads):
+            first_chars = self._slice_for_thread(i)
+            t = threading.Thread(target=self._worker, args=(first_chars,), daemon=True)
             threads.append(t)
             t.start()
 
@@ -135,4 +148,5 @@ class ThreadedBruteForcer:
         tried = self.get_total_tested()
         with self._found_lock:
             pw = self._found_password
+
         return CrackResult(found=(pw is not None), password=pw, tried=tried)
