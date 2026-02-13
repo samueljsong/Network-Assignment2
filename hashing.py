@@ -68,6 +68,9 @@ def _passlib_has_scheme(name: str) -> bool:
 def build_verifier(full_hash: str) -> HashVerifier:
     algo = detect_algorithm_name(full_hash)
 
+    if algo in ("md5_crypt", "sha256_crypt", "sha512_crypt") and CRYPT_AVAILABLE:
+        return CryptVerifier(full_hash=full_hash)
+
     if PASSLIB_AVAILABLE:
 
         candidates = ["bcrypt", "sha512_crypt", "sha256_crypt", "md5_crypt", "yescrypt"]
