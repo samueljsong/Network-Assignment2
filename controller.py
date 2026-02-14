@@ -181,9 +181,8 @@ class ControllerApp:
         print(f"Parse time:        {timings.parse_time:.6f}")
         print(f"Send latency:      {timings.dispatch_latency:.6f}")
         print(f"Worker compute:    {timings.worker_compute:.6f}")
-        print(f"Worker total rt:   {result.worker_total_runtime:.6f}")
         print(f"Return latency:    {timings.return_latency:.6f}")
-        print(f"Total runtime:     {timings.total_runtime:.6f}")
+        print(f"Worker total rt:   {result.worker_total_runtime:.6f}")
 
 
 def main() -> None:

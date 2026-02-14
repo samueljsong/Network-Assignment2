@@ -124,5 +124,5 @@ def supported_charset_79() -> str:
         "abcdefghijklmnopqrstuvwxyz"
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
         "0123456789"
-        "!@#$%^&*()-_=+[]{}|;:',.<>/?"
+        "@#%^&*()_+-=.,:;?"
     )
