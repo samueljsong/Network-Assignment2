@@ -79,6 +79,7 @@ class Result:
     found: bool
     password: Optional[str]
     compute_time: float
+    worker_total_runtime: float  # NEW: worker.py process lifetime
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -87,6 +88,7 @@ class Result:
             "found": self.found,
             "password": self.password,
             "compute_time": self.compute_time,
+            "worker_total_runtime": self.worker_total_runtime,
         }
 
     @staticmethod
@@ -99,6 +101,7 @@ class Result:
             found=bool(d["found"]),
             password=d.get("password", None),
             compute_time=float(d["compute_time"]),
+            worker_total_runtime=float(d.get("worker_total_runtime", 0.0)),
         )
 
 

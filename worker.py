@@ -15,7 +15,10 @@ from common import (
     heartbeat_resp_dict,
 )
 from cracking import StaticFirstCharBruteForcer
-from hashing import build_verifier
+from hashing import build_verifier, detect_algorithm_name
+
+# Process lifetime start (runs as soon as worker.py starts executing)
+WORKER_PROCESS_START = time.perf_counter()
 
 
 class WorkerApp:
@@ -77,6 +80,7 @@ class WorkerApp:
 
             verifier = build_verifier(job.full_hash)
 
+            # Debug (optional)
             print("Algo:", detect_algorithm_name(job.full_hash))
             print("Verifier:", verifier.__class__.__name__)
 
@@ -89,14 +93,21 @@ class WorkerApp:
                 verifier=verifier,
                 charset=job.charset,
                 threads=self.threads,
-                batch_commit=200,  # use 10–25 for yescrypt if you want more frequent HB progress
+                batch_commit=200,
             )
 
             t0 = time.perf_counter()
             crack_res = self._bruteforcer.run()
             t1 = time.perf_counter()
 
-            result = Result(found=crack_res.found, password=crack_res.password, compute_time=(t1 - t0))
+            worker_total_runtime = time.perf_counter() - WORKER_PROCESS_START
+
+            result = Result(
+                found=crack_res.found,
+                password=crack_res.password,
+                compute_time=(t1 - t0),
+                worker_total_runtime=worker_total_runtime,
+            )
             self._safe_send(sock, result.to_dict())
 
             self._done.set()
