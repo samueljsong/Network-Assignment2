@@ -6,8 +6,8 @@ from typing import Protocol
 
 PASSLIB_AVAILABLE = False
 try:
-    from passlib.context import CryptContext  # type: ignore
-    from passlib.registry import get_crypt_handler  # type: ignore
+    from passlib.context import CryptContext
+    from passlib.registry import get_crypt_handler
     PASSLIB_AVAILABLE = True
 except Exception:
     PASSLIB_AVAILABLE = False
@@ -68,11 +68,9 @@ def _passlib_has_scheme(name: str) -> bool:
 def build_verifier(full_hash: str) -> HashVerifier:
     algo = detect_algorithm_name(full_hash)
 
-    # Prefer system crypt() for classic crypt hashes (often C-backed / faster)
     if algo in ("md5_crypt", "sha256_crypt", "sha512_crypt") and CRYPT_AVAILABLE:
         return CryptVerifier(full_hash=full_hash)
 
-    # Prefer passlib for bcrypt/yescrypt when available
     if PASSLIB_AVAILABLE:
         candidates = ["bcrypt", "sha512_crypt", "sha256_crypt", "md5_crypt", "yescrypt"]
         schemes = [s for s in candidates if _passlib_has_scheme(s)]
@@ -81,7 +79,6 @@ def build_verifier(full_hash: str) -> HashVerifier:
             ctx = CryptContext(schemes=schemes, deprecated="auto")
             return PasslibVerifier(ctx=ctx, full_hash=full_hash)
 
-    # Fallback to crypt() if available (covers yescrypt on many Linux installs)
     if CRYPT_AVAILABLE:
         return CryptVerifier(full_hash=full_hash)
 

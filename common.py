@@ -79,7 +79,7 @@ class Result:
     found: bool
     password: Optional[str]
     compute_time: float
-    worker_total_runtime: float  # NEW: worker.py process lifetime
+    worker_total_runtime: float
 
     def to_dict(self) -> Dict[str, Any]:
         return {

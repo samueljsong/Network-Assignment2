@@ -17,7 +17,6 @@ from common import (
 from cracking import StaticFirstCharBruteForcer
 from hashing import build_verifier, detect_algorithm_name
 
-# Process lifetime start (runs as soon as worker.py starts executing)
 WORKER_PROCESS_START = time.perf_counter()
 
 
@@ -80,7 +79,6 @@ class WorkerApp:
 
             verifier = build_verifier(job.full_hash)
 
-            # Debug (optional)
             print("Algo:", detect_algorithm_name(job.full_hash))
             print("Verifier:", verifier.__class__.__name__)
 
